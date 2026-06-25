@@ -1,0 +1,12 @@
+---
+composability_notes:
+  - picosam3 QAT schedule
+
+policies:
+  - starting_epoch: 0
+    ending_epoch: 20
+    quantizer:
+      class: PostTrainLinearQuantizer
+      bits_activations: 8
+      bits_weights: 8
+      bits_bias: 8

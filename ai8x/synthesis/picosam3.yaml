@@ -1,0 +1,131 @@
+# PicoSAM3 synthesis config for MAX78000 (concat-based skip connections)
+# Input:  3 x 80 x 80 (software-folded to 12 x 40 x 40 before feeding to CNN)
+# Output: 1 x 20 x 20 binary mask
+#
+# Concat mechanism on MAX78000:
+#   - Two source layers write to the SAME out_offset
+#   - But each writes to a DIFFERENT processor group
+#   - The combining conv reads both groups via in_sequences
+#   - PyTorch's torch.cat([d3, enc3]) order is preserved by:
+#       d3 → low processors  (becomes input channels 0..31)
+#       enc3 → high processors (becomes input channels 32..63)
+
+
+# PicoSAM3 synthesis config for MAX78000 (concat-based skip connections)
+# Input:  3 x 80 x 80 (software-folded to 12 x 40 x 40)
+# Output: 1 x 20 x 20 binary mask
+
+arch: picosam3
+dataset: picosam_folded
+
+layers:
+  # =========================================================================
+  # ENCODER
+  # =========================================================================
+
+  # Layer 0: enc1_conv (12 In -> 16 Out)
+  - out_offset: 0x2000
+    processors: 0x0000000000000fff        # 12 bits IN
+    output_processors: 0x000000000000ffff # 16 bits OUT (Processors 0-15)
+    operation: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+
+  # Layer 1: enc2_pool_conv (16 In -> 32 Out)
+  # Pushes output to HIGH processors for Layer 7 skip connection
+  - out_offset: 0x4000
+    processors: 0x000000000000ffff        # 16 bits IN (From Layer 0)
+    output_processors: 0xffffffff00000000 # 32 bits OUT (Processors 32-63)
+    operation: conv2d
+    kernel_size: 3x3
+    pad: 1
+    max_pool: 2
+    pool_stride: 2
+    activate: ReLU
+
+  # Layer 2: enc3_pool_conv (32 In -> 32 Out)
+  # Pushes output to HIGH processors for Layer 5 skip connection
+  - out_offset: 0x6000
+    processors: 0xffffffff00000000        # 32 bits IN (From Layer 1)
+    output_processors: 0xffffffff00000000 # 32 bits OUT (Processors 32-63)
+    operation: conv2d
+    kernel_size: 3x3
+    pad: 1
+    max_pool: 2
+    pool_stride: 2
+    activate: ReLU
+
+  # =========================================================================
+  # BOTTLENECK
+  # =========================================================================
+
+  # Layer 3: bottleneck_pool_conv (32 In -> 48 Out)
+  - out_offset: 0x0000
+    processors: 0xffffffff00000000        # 32 bits IN (From Layer 2)
+    output_processors: 0x0000ffffffffffff # 48 bits OUT (Processors 0-47)
+    operation: conv2d
+    kernel_size: 3x3
+    pad: 1
+    max_pool: 2
+    pool_stride: 2
+    activate: ReLU
+
+  # =========================================================================
+  # DECODER (with concat skip connections)
+  # =========================================================================
+
+  # Layer 4: dec3_up (ConvTranspose, 48 In -> 32 Out)
+  # Writes to LOW processors at SAME 0x6000 offset to setup concat
+  - out_offset: 0x6000               
+    processors: 0x0000ffffffffffff        # 48 bits IN (From Layer 3)
+    output_processors: 0x00000000ffffffff # 32 bits OUT (Processors 0-31)
+    operation: convtranspose2d
+    kernel_size: 3x3
+    stride: 2
+    pad: 1
+
+  # Layer 5: dec3_conv (64 In -> 32 Out)
+  # Concat: Reads L4 (LOW 32) + L2 (HIGH 32) = 64 inputs
+  - in_sequences: [4, 2]
+    out_offset: 0x0000
+    processors: 0xffffffffffffffff        # 64 bits IN (32 + 32)
+    output_processors: 0x00000000ffffffff # 32 bits OUT (Processors 0-31)
+    operation: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+
+  # Layer 6: dec2_up (ConvTranspose, 32 In -> 32 Out)
+  # Writes to LOW processors at SAME 0x4000 offset to setup concat
+  - out_offset: 0x4000               
+    processors: 0x00000000ffffffff        # 32 bits IN (From Layer 5)
+    output_processors: 0x00000000ffffffff # 32 bits OUT (Processors 0-31)
+    operation: convtranspose2d
+    kernel_size: 3x3
+    stride: 2
+    pad: 1
+
+  # Layer 7: dec2_conv (64 In -> 32 Out)
+  # Concat: Reads L6 (LOW 32) + L1 (HIGH 32) = 64 inputs
+  - in_sequences: [6, 1]
+    out_offset: 0x0000
+    processors: 0xffffffffffffffff        # 64 bits IN (32 + 32)
+    output_processors: 0x00000000ffffffff # 32 bits OUT (Processors 0-31)
+    operation: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+
+  # =========================================================================
+  # OUTPUT HEAD
+  # =========================================================================
+
+  # Layer 8: output_conv (32 In -> 1 Out)
+  - out_offset: 0x4000
+    processors: 0x00000000ffffffff        # 32 bits IN (From Layer 7)
+    output_processors: 0x0000000000000001 # 1 bit OUT (Processor 0)
+    operation: conv2d
+    kernel_size: 1x1
+    pad: 0
+    output_width: 32
